@@ -1,6 +1,7 @@
 // Virtual thumbstick. Reports x/y in -1…1 (y down). Pushing to the outer edge is "boost".
 import { useEffect, useRef, useState } from 'react';
-import { Animated, PanResponder, StyleSheet, View, useAnimatedValueXY } from 'react-native';
+import { Animated, Platform, StyleSheet, View, useAnimatedValueXY } from 'react-native';
+import { createSingleTouchHandlers } from '../lib/single-touch';
 import { useStyles } from '../lib/settings';
 import type { Tokens } from '../lib/theme';
 
@@ -17,7 +18,7 @@ export default function Joystick({ onChange, boost }: { onChange: (x: number, y:
 	// Gesture callbacks run on touch events, never during render; the refs they use are read there.
 	// eslint-disable-next-line react-hooks/refs -- refs are only read inside touch callbacks, not during render
 	const [responder] = useState(() => {
-		const start = { x: 0, y: 0 };
+		const start = { x: 0, y: 0, pageX: 0, pageY: 0 };
 		const move = (px: number, py: number) => {
 			let x = px / TRAVEL, y = py / TRAVEL;
 			const m = Math.hypot(x, y);
@@ -29,24 +30,22 @@ export default function Joystick({ onChange, boost }: { onChange: (x: number, y:
 			Animated.spring(knob, { toValue: { x: 0, y: 0 }, useNativeDriver: true, speed: 30, bounciness: 4 }).start();
 			cb.current(0, 0);
 		};
-		return PanResponder.create({
-			onStartShouldSetPanResponder: () => true,
-			onMoveShouldSetPanResponder: () => true,
-			onPanResponderTerminationRequest: () => false,
-			onPanResponderGrant: (e) => {
+		return createSingleTouchHandlers({
+			onStart: (touch) => {
+				knob.stopAnimation();
 				// where the thumb lands, relative to the stick's centre
-				start.x = e.nativeEvent.locationX - STICK_SIZE / 2;
-				start.y = e.nativeEvent.locationY - STICK_SIZE / 2;
+				start.x = touch.locationX - STICK_SIZE / 2;
+				start.y = touch.locationY - STICK_SIZE / 2;
+				start.pageX = touch.pageX; start.pageY = touch.pageY;
 				move(start.x, start.y);
 			},
-			onPanResponderMove: (_e, g) => move(start.x + g.dx, start.y + g.dy),
-			onPanResponderRelease: reset,
-			onPanResponderTerminate: reset,
+			onMove: (touch) => move(start.x + touch.pageX - start.pageX, start.y + touch.pageY - start.pageY),
+			onEnd: reset,
 		});
 	});
 
 	return (
-		<View style={styles.base} {...responder.panHandlers} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+		<View style={styles.base} {...responder} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
 			<View pointerEvents="none" style={[styles.ring, boost && styles.ringBoost]} />
 			<Animated.View pointerEvents="none" style={[styles.knob, boost && styles.knobBoost, { transform: knob.getTranslateTransform() }]} />
 		</View>
@@ -56,6 +55,7 @@ export default function Joystick({ onChange, boost }: { onChange: (x: number, y:
 const createStyles = (t: Tokens) =>
 	StyleSheet.create({
 		base: {
+			...(Platform.OS === 'web' ? { touchAction: 'none' } : {}),
 			width: STICK_SIZE, height: STICK_SIZE, borderRadius: STICK_SIZE / 2,
 			backgroundColor: t.glass, borderWidth: 1, borderColor: t.glassBorder,
 			alignItems: 'center', justifyContent: 'center',

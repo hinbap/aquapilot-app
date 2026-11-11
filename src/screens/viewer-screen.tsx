@@ -1,6 +1,6 @@
-// Landscape 3D fly-through. Left thumb: joystick (edge = boost). Right side: drag to aim, pinch to zoom. ▲▼: rise / sink.
+// Landscape 3D fly-through. Left thumb: joystick (edge = boost). Right side: drag to aim while moving. ▲▼: rise / sink.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BackHandler, PanResponder, Pressable, StyleSheet, Text, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
+import { BackHandler, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
@@ -8,6 +8,7 @@ import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { ArrowLeftIcon, CaretDownIcon, CaretUpIcon, CrosshairIcon, ArrowsOutCardinalIcon } from 'phosphor-react-native';
 import Joystick from '../components/joystick';
+import { createSingleTouchHandlers } from '../lib/single-touch';
 import { PROJECTS, projectName } from '../lib/data';
 import { createGLRenderer } from '../lib/gl-renderer';
 import { fmtLen, getModel, niceStep, type ModelInfo, type Seg, type V3 } from '../lib/models';
@@ -31,8 +32,6 @@ type GLState = {
 };
 
 const LOOK_SPEED = 0.0045; // radians per px
-const PINCH_SPEED = 0.006; // model-radii per px
-const PINCH_RELEASE_DELAY_MS = 250;
 
 export default function ViewerScreen({ projectId }: { projectId: string }) {
 	const { t, s, settings } = useApp();
@@ -69,9 +68,6 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	}, [model]);
 	useEffect(resetView, [resetView]);
 
-	const radius = useRef(model.R);
-	useEffect(() => { radius.current = model.R; }, [model.R]);
-
 	const [size, setSize] = useState({ w: 0, h: 0 });
 	const sizeRef = useRef(size);
 	useEffect(() => { sizeRef.current = size; }, [size]);
@@ -96,70 +92,20 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	}, [model, t, s]);
 	useEffect(build, [build]);
 
-	// ── pointer: one finger looks around, two fingers pinch-zoom ──
-	// Gesture callbacks run on touch events, not during render.
+	// Track the look finger independently from the joystick; extra fingers never zoom.
 	// eslint-disable-next-line react-hooks/refs -- refs are only read inside touch callbacks, not during render
 	const [look] = useState(() => {
 		const last = { x: 0, y: 0 };
-		const pinch: { d: number | null; resumeLookAt: number } = { d: null, resumeLookAt: 0 };
-		const touches = (e: GestureResponderEvent) => e.nativeEvent.touches;
-		const dist = (e: GestureResponderEvent) => {
-			const [a, b] = touches(e);
-			return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
-		};
-		const reset = () => { pinch.d = null; pinch.resumeLookAt = 0; };
-		const syncTouches = (e: GestureResponderEvent) => {
-			const active = touches(e);
-			if (active.length >= 2) {
-				pinch.d = dist(e);
-				pinch.resumeLookAt = 0;
-			} else {
-				if (pinch.d !== null) pinch.resumeLookAt = Date.now() + PINCH_RELEASE_DELAY_MS;
-				pinch.d = null;
-			}
-			if (active[0]) { last.x = active[0].pageX; last.y = active[0].pageY; }
-		};
-		return PanResponder.create({
-			onStartShouldSetPanResponder: () => true,
-			onMoveShouldSetPanResponder: () => true,
-			onPanResponderGrant: (e) => {
-				reset();
-				syncTouches(e);
-			},
-			onPanResponderStart: syncTouches,
-			onPanResponderEnd: syncTouches,
-			onPanResponderRelease: reset,
-			onPanResponderTerminate: reset,
-			onPanResponderMove: (e) => {
+		return createSingleTouchHandlers({
+			onStart: (touch) => { last.x = touch.pageX; last.y = touch.pageY; },
+			onMove: (touch) => {
 				const c = cam.current;
-				if (touches(e).length >= 2) {
-					const d = dist(e);
-					if (pinch.d !== null) {
-						const cp = Math.cos(c.pitch);
-						const fw: V3 = [-Math.sin(c.yaw) * cp, Math.sin(c.pitch), -Math.cos(c.yaw) * cp];
-						const amount = (d - pinch.d) * PINCH_SPEED * radius.current;
-						for (let i = 0; i < 3; i++) c.pos[i] += fw[i] * amount;
-					}
-					pinch.d = d;
-					pinch.resumeLookAt = 0;
-				} else {
-					const [touch] = touches(e);
-					if (!touch) return;
-					if (pinch.d !== null) syncTouches(e);
-					const x = touch.pageX, y = touch.pageY;
-					// Ignore staggered finger lifts, then rebase once before looking again.
-					// Use the remaining touch, since the event itself may describe the lifted one.
-					if (pinch.resumeLookAt) {
-						last.x = x; last.y = y;
-						if (Date.now() >= pinch.resumeLookAt) pinch.resumeLookAt = 0;
-						return;
-					}
-					c.yaw -= (x - last.x) * LOOK_SPEED;
-					c.pitch = Math.max(-1.5, Math.min(1.5, c.pitch - (y - last.y) * LOOK_SPEED));
-					last.x = x; last.y = y;
-				}
+				c.yaw -= (touch.pageX - last.x) * LOOK_SPEED;
+				c.pitch = Math.max(-1.5, Math.min(1.5, c.pitch - (touch.pageY - last.y) * LOOK_SPEED));
+				last.x = touch.pageX; last.y = touch.pageY;
 				setHint(false);
 			},
+			onEnd: () => {},
 		});
 	});
 
@@ -303,7 +249,7 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 				</View>
 			)}
 
-			<View style={StyleSheet.absoluteFill} {...look.panHandlers} />
+			<View style={styles.lookArea} {...look} />
 
 			<View style={styles.crosshair} pointerEvents="none">
 				<View style={styles.crossV} />
@@ -497,6 +443,7 @@ function buildScene(g: GLState, m: ModelInfo, t: Tokens, s: Strings): { labels: 
 
 const createStyles = (t: Tokens) =>
 	StyleSheet.create({
+		lookArea: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, ...(Platform.OS === 'web' ? { touchAction: 'none' } : {}) },
 		root: { flex: 1, backgroundColor: t.bg },
 		errorWrap: { position: 'absolute', alignSelf: 'center', top: '44%', alignItems: 'center', gap: 8, maxWidth: '78%' },
 		error: { fontFamily: t.body, fontSize: 14, color: t.muted, textAlign: 'center' },
