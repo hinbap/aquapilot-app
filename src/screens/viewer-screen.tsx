@@ -1,6 +1,6 @@
 // Landscape 3D fly-through. Left thumb: joystick (edge = boost). Right side: drag to aim, pinch to zoom. ▲▼: rise / sink.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, Pressable, StyleSheet, Text, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
+import { BackHandler, PanResponder, Pressable, StyleSheet, Text, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { ArrowLeftIcon, CaretDownIcon, CaretUpIcon, CrosshairIcon, ArrowsOutCardinalIcon } from 'phosphor-react-native';
 import Joystick from '../components/joystick';
 import { PROJECTS, projectName } from '../lib/data';
+import { createGLRenderer } from '../lib/gl-renderer';
 import { fmtLen, getModel, niceStep, type ModelInfo, type Seg, type V3 } from '../lib/models';
 import { useApp, useStyles } from '../lib/settings';
 import type { Tokens } from '../lib/theme';
@@ -31,6 +32,7 @@ type GLState = {
 
 const LOOK_SPEED = 0.0045; // radians per px
 const PINCH_SPEED = 0.006; // model-radii per px
+const PINCH_RELEASE_DELAY_MS = 250;
 
 export default function ViewerScreen({ projectId }: { projectId: string }) {
 	const { t, s, settings } = useApp();
@@ -38,6 +40,15 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	const insets = useSafeAreaInsets();
 	const project = PROJECTS.find((p) => p.id === projectId) ?? PROJECTS[0];
 	const model = useMemo(() => getModel(project.id), [project.id]);
+
+	// Android's system back gesture/button must not interrupt camera controls.
+	// The on-screen back button still navigates explicitly through Expo Router.
+	useFocusEffect(
+		useCallback(() => {
+			const subscription = BackHandler.addEventListener('hardwareBackPress', () => true);
+			return () => subscription.remove();
+		}, []),
+	);
 
 	// Lock to landscape while this screen is focused; back to portrait on leave.
 	useFocusEffect(
@@ -72,7 +83,7 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	const [labels, setLabels] = useState<LabelView[]>([]);
 	const [hud, setHud] = useState({ speed: '', boost: false, pos: '' });
 	const [hint, setHint] = useState(true);
-	const [failed, setFailed] = useState(false);
+	const [failMsg, setFailMsg] = useState<string | null>(null);
 	const glRef = useRef<GLState | null>(null);
 
 	// ── scene (re)build: on first context, and whenever theme / accent / language change ──
@@ -90,35 +101,59 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	// eslint-disable-next-line react-hooks/refs -- refs are only read inside touch callbacks, not during render
 	const [look] = useState(() => {
 		const last = { x: 0, y: 0 };
-		const pinch = { d: 0 };
+		const pinch: { d: number | null; resumeLookAt: number } = { d: null, resumeLookAt: 0 };
 		const touches = (e: GestureResponderEvent) => e.nativeEvent.touches;
 		const dist = (e: GestureResponderEvent) => {
 			const [a, b] = touches(e);
 			return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
 		};
+		const reset = () => { pinch.d = null; pinch.resumeLookAt = 0; };
+		const syncTouches = (e: GestureResponderEvent) => {
+			const active = touches(e);
+			if (active.length >= 2) {
+				pinch.d = dist(e);
+				pinch.resumeLookAt = 0;
+			} else {
+				if (pinch.d !== null) pinch.resumeLookAt = Date.now() + PINCH_RELEASE_DELAY_MS;
+				pinch.d = null;
+			}
+			if (active[0]) { last.x = active[0].pageX; last.y = active[0].pageY; }
+		};
 		return PanResponder.create({
 			onStartShouldSetPanResponder: () => true,
 			onMoveShouldSetPanResponder: () => true,
 			onPanResponderGrant: (e) => {
-				last.x = e.nativeEvent.pageX; last.y = e.nativeEvent.pageY;
-				pinch.d = touches(e).length >= 2 ? dist(e) : 0;
+				reset();
+				syncTouches(e);
 			},
+			onPanResponderStart: syncTouches,
+			onPanResponderEnd: syncTouches,
+			onPanResponderRelease: reset,
+			onPanResponderTerminate: reset,
 			onPanResponderMove: (e) => {
 				const c = cam.current;
 				if (touches(e).length >= 2) {
 					const d = dist(e);
-					if (pinch.d) {
+					if (pinch.d !== null) {
 						const cp = Math.cos(c.pitch);
 						const fw: V3 = [-Math.sin(c.yaw) * cp, Math.sin(c.pitch), -Math.cos(c.yaw) * cp];
 						const amount = (d - pinch.d) * PINCH_SPEED * radius.current;
 						for (let i = 0; i < 3; i++) c.pos[i] += fw[i] * amount;
 					}
 					pinch.d = d;
-					const [a] = touches(e);
-					last.x = a.pageX; last.y = a.pageY;
+					pinch.resumeLookAt = 0;
 				} else {
-					pinch.d = 0;
-					const x = e.nativeEvent.pageX, y = e.nativeEvent.pageY;
+					const [touch] = touches(e);
+					if (!touch) return;
+					if (pinch.d !== null) syncTouches(e);
+					const x = touch.pageX, y = touch.pageY;
+					// Ignore staggered finger lifts, then rebase once before looking again.
+					// Use the remaining touch, since the event itself may describe the lifted one.
+					if (pinch.resumeLookAt) {
+						last.x = x; last.y = y;
+						if (Date.now() >= pinch.resumeLookAt) pinch.resumeLookAt = 0;
+						return;
+					}
 					c.yaw -= (x - last.x) * LOOK_SPEED;
 					c.pitch = Math.max(-1.5, Math.min(1.5, c.pitch - (y - last.y) * LOOK_SPEED));
 					last.x = x; last.y = y;
@@ -131,20 +166,12 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	// ── GL context + render loop ──
 	const onContextCreate = useCallback(
 		(gl: ExpoWebGLRenderingContext) => {
+			// GLView remounts when its key (screen size) changes; retire the old loop + context first.
+			teardownGL(glRef.current);
+			glRef.current = null;
 			try {
-				// expo-gl ignores some pixelStorei params; keep only the one it supports to avoid log spam.
-				const pixelStorei = gl.pixelStorei.bind(gl);
-				gl.pixelStorei = (pname: number, param: number | boolean) => {
-					if (pname === gl.UNPACK_FLIP_Y_WEBGL) pixelStorei(pname, param as number);
-				};
 				const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
-				const canvas = {
-					width: w, height: h, clientWidth: w, clientHeight: h, style: {},
-					addEventListener: () => { }, removeEventListener: () => { }, getContext: () => gl,
-				} as unknown as HTMLCanvasElement;
-				const renderer = new THREE.WebGLRenderer({ canvas, context: gl as unknown as WebGL2RenderingContext, antialias: true });
-				renderer.setPixelRatio(1);
-				renderer.setSize(w, h, false);
+				const renderer = createGLRenderer(gl);
 
 				const scene = new THREE.Scene();
 				scene.fog = new THREE.Fog(0x000000, 10, 100);
@@ -170,7 +197,7 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 				let lastT = Date.now(), frame = 0;
 				const loop = () => {
 					const g = glRef.current;
-					if (!g) return;
+					if (!g || g.renderer !== renderer) return; // superseded by a newer context
 					g.raf = requestAnimationFrame(loop);
 					const now = Date.now(), dt = Math.min(0.05, (now - lastT) / 1000);
 					lastT = now; frame++;
@@ -224,20 +251,19 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 					}
 				};
 				loop();
-			} catch {
-				setFailed(true);
+			} catch (e) {
+				teardownGL(glRef.current);
+				glRef.current = null;
+				// Surface the real cause — a bare catch here makes engine failures undiagnosable.
+				console.error('3D engine failed to start:', e);
+				setFailMsg(e instanceof Error ? e.message : String(e));
 			}
 		},
 		[build, model, s.boost],
 	);
 
 	useEffect(() => () => {
-		const g = glRef.current;
-		if (g) {
-			cancelAnimationFrame(g.raf);
-			disposeGroup(g.group);
-			g.renderer.dispose();
-		}
+		teardownGL(glRef.current);
 		glRef.current = null;
 	}, []);
 
@@ -256,8 +282,13 @@ export default function ViewerScreen({ projectId }: { projectId: string }) {
 	return (
 		<View style={styles.root} onLayout={onLayout}>
 			{/* Mount GL only once the screen has rotated, so the drawing buffer is landscape-sized. */}
-			{landscape && !failed && <GLView key={`${size.w}x${size.h}`} style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />}
-			{failed && <Text style={styles.error}>{s.engineError}</Text>}
+			{landscape && !failMsg && <GLView key={`${size.w}x${size.h}`} style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />}
+			{failMsg && (
+				<View style={styles.errorWrap}>
+					<Text style={styles.error}>{s.engineError}</Text>
+					<Text style={styles.errorDetail}>{failMsg}</Text>
+				</View>
+			)}
 
 			{dimsOn && (
 				<View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -342,6 +373,17 @@ function disposeGroup(group: THREE.Group | null) {
 		const m = o as THREE.Mesh;
 		if (m.geometry) m.geometry.dispose();
 	});
+}
+
+function teardownGL(g: GLState | null) {
+	if (!g) return;
+	cancelAnimationFrame(g.raf);
+	try {
+		disposeGroup(g.group);
+		g.renderer.dispose();
+	} catch {
+		// the context may already be destroyed after a GLView remount
+	}
 }
 
 function segGeometry(segs: Seg[]) {
@@ -456,7 +498,9 @@ function buildScene(g: GLState, m: ModelInfo, t: Tokens, s: Strings): { labels: 
 const createStyles = (t: Tokens) =>
 	StyleSheet.create({
 		root: { flex: 1, backgroundColor: t.bg },
-		error: { position: 'absolute', alignSelf: 'center', top: '48%', fontFamily: t.body, fontSize: 14, color: t.muted },
+		errorWrap: { position: 'absolute', alignSelf: 'center', top: '44%', alignItems: 'center', gap: 8, maxWidth: '78%' },
+		error: { fontFamily: t.body, fontSize: 14, color: t.muted, textAlign: 'center' },
+		errorDetail: { fontFamily: t.mono, fontSize: 10, lineHeight: 15, letterSpacing: 0.5, color: t.faint, textAlign: 'center' },
 		pressed: { opacity: 0.6 },
 		labelWrap: { position: 'absolute', transform: [{ translateX: '-50%' }, { translateY: '-50%' }] },
 		label: {

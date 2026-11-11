@@ -34,10 +34,11 @@ function AppStack() {
 			<StatusBar style={t.isDark ? 'light' : 'dark'} />
 			<Stack screenOptions={{ headerShown: false, contentStyle: styles.root, animation: 'fade' }}>
 				<Stack.Screen name="index" />
+				<Stack.Screen name="camera" options={{ animation: 'slide_from_bottom' }} />
 				<Stack.Screen name="projects" options={{ animation: 'slide_from_right' }} />
 				<Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
 				<Stack.Screen name="login" options={{ animation: 'slide_from_bottom' }} />
-				<Stack.Screen name="viewer/[id]" options={{ animation: 'fade' }} />
+				<Stack.Screen name="viewer/[id]" options={{ animation: 'fade', gestureEnabled: false }} />
 			</Stack>
 		</>
 	);

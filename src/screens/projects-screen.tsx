@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -14,6 +14,7 @@ export default function ProjectsScreen() {
 	const { t, s, settings } = useApp();
 	const styles = useStyles(createStyles);
 	const [sharing, setSharing] = useState<Project | null>(null);
+	const closeShare = useCallback(() => setSharing(null), []);
 
 	const open = (p: Project) => router.push({ pathname: '/viewer/[id]', params: { id: p.id } });
 
@@ -59,7 +60,7 @@ export default function ProjectsScreen() {
 					);
 				}}
 			/>
-			<ShareSheet visible={!!sharing} projectName={sharing ? projectName(sharing, settings.lang) : ''} onClose={() => setSharing(null)} />
+			{sharing && <ShareSheet key={sharing.id} projectName={projectName(sharing, settings.lang)} onClose={closeShare} />}
 		</SafeAreaView>
 	);
 }

@@ -1,0 +1,26 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.opencvbridge'
+version = '1.0.0'
+
+android {
+  namespace 'expo.modules.opencvbridge'
+
+  defaultConfig {
+    consumerProguardFiles 'consumer-rules.pro'
+    externalNativeBuild {
+      cmake {
+        cppFlags '-std=c++17 -fexceptions'
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path 'CMakeLists.txt'
+    }
+  }
+}

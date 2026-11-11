@@ -1,1 +1,5 @@
-// Define your exported module types here.
+export type PhotoReceipt = {
+	byteCount: number;
+	width: number;
+	height: number;
+};

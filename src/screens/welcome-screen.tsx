@@ -1,4 +1,6 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { getPendingResultAsync } from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowRightIcon } from 'phosphor-react-native';
 import LogoMark from '../components/logo-mark';
@@ -6,6 +8,7 @@ import DotMarquee from '../components/dot-marquee';
 import { useApp, useStyles } from '../lib/settings';
 import type { Tokens } from '../lib/theme';
 import { useRouter } from 'expo-router';
+import { choosePhoto, type Photo } from '../lib/photo-library';
 
 type Props = {
 	onTakePhoto?: () => void;
@@ -18,13 +21,40 @@ export default function WelcomeScreen({ onTakePhoto, onChooseFromGallery, onPriv
 	const { s } = useApp();
 	const styles = useStyles(createStyles);
 	const router = useRouter();
+	const picking = useRef(false);
+	const [galleryBusy, setGalleryBusy] = useState(false);
+	const [galleryError, setGalleryError] = useState(false);
+	const reviewPhoto = useCallback((photo: Photo) => {
+		router.push({ pathname: '/camera', params: { photoUri: photo.uri, photoWidth: photo.width, photoHeight: photo.height } });
+	}, [router]);
 
-	const rows = [
-		{ index: '01', label: s.takePhoto, onPress: onTakePhoto },
-		{ index: '02', label: s.gallery, onPress: onChooseFromGallery },
-		{ index: '03', label: s.previous, onPress: () => router.navigate('/projects') },
-		{ index: '04', label: s.settings, onPress: () => router.navigate('/settings') },
-	];
+	useEffect(() => {
+		if (Platform.OS !== 'android') return;
+		let mounted = true;
+		// Recover a selection if Android recreated the activity while the picker was open.
+		getPendingResultAsync().then((result) => {
+			if (!mounted || !result) return;
+			if ('code' in result) { setGalleryError(true); return; }
+			if (!result.canceled && result.assets[0]) reviewPhoto(result.assets[0]);
+		}).catch(() => { if (mounted) setGalleryError(true); });
+		return () => { mounted = false; };
+	}, [reviewPhoto]);
+
+	const openGallery = useCallback(async () => {
+		if (picking.current) return;
+		picking.current = true;
+		setGalleryBusy(true);
+		setGalleryError(false);
+		try {
+			const photo = await choosePhoto();
+			if (photo) reviewPhoto(photo);
+		} catch {
+			setGalleryError(true);
+		} finally {
+			picking.current = false;
+			setGalleryBusy(false);
+		}
+	}, [reviewPhoto]);
 
 	return (
 		<SafeAreaView style={styles.root} edges={['top', 'bottom']}>
@@ -36,9 +66,11 @@ export default function WelcomeScreen({ onTakePhoto, onChooseFromGallery, onPriv
 			<View style={styles.spacer} />
 
 			<View style={styles.actions}>
-				{rows.map((r) => (
-					<ActionRow key={r.index} index={r.index} label={r.label} onPress={r.onPress} />
-				))}
+				<ActionRow index="01" label={s.takePhoto} onPress={onTakePhoto ?? (() => router.navigate('/camera'))} disabled={galleryBusy} />
+				<ActionRow index="02" label={s.gallery} onPress={onChooseFromGallery ?? openGallery} disabled={galleryBusy} />
+				<ActionRow index="03" label={s.previous} onPress={() => router.navigate('/projects')} disabled={galleryBusy} />
+				<ActionRow index="04" label={s.settings} onPress={() => router.navigate('/settings')} disabled={galleryBusy} />
+				{galleryError && <Text accessibilityRole="alert" style={styles.error}>{s.galleryError}</Text>}
 			</View>
 
 			<View style={styles.legal}>
@@ -58,11 +90,11 @@ export default function WelcomeScreen({ onTakePhoto, onChooseFromGallery, onPriv
 	);
 }
 
-function ActionRow({ index, label, onPress }: { index: string; label: string; onPress?: () => void }) {
+function ActionRow({ index, label, onPress, disabled }: { index: string; label: string; onPress?: () => void; disabled?: boolean }) {
 	const { t } = useApp();
 	const styles = useStyles(createStyles);
 	return (
-		<Pressable onPress={onPress} style={styles.row} accessibilityRole="button" accessibilityLabel={label}>
+		<Pressable onPress={onPress} disabled={disabled} style={styles.row} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }}>
 			{({ pressed }) => (
 				<>
 					<Text style={styles.rowIndex}>{index}</Text>
@@ -80,6 +112,7 @@ const createStyles = (t: Tokens) =>
 		hero: { alignItems: 'center', gap: 44, marginTop: 90 },
 		spacer: { flex: 1 },
 		actions: { paddingHorizontal: 32 },
+		error: { fontFamily: t.mono, fontSize: 12, lineHeight: 18, color: t.error, paddingHorizontal: 4 },
 		row: { flexDirection: 'row', alignItems: 'center', gap: 16, paddingVertical: 16, paddingHorizontal: 4 },
 		rowIndex: { fontFamily: t.monoLatin, fontSize: 12, letterSpacing: 0.5, color: t.ink, opacity: 0.8 },
 		rowLabel: { flex: 1, fontFamily: t.mono, fontSize: 14, letterSpacing: t.rowSpacing, color: t.text },
